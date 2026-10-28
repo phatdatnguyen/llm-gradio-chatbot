@@ -1,0 +1,124 @@
+"""Conversion between saved conversations, local model requests, and the chat UI.
+
+Internal history is a list of dicts: ``{"role", "content"}`` plus an optional
+``image_url`` (a data URL) on user turns. That shape is what gets saved to JSON
+and what the Gradio chatbot renders, after ``replace_history_content()`` strips
+the bulky inlined document/link blocks back down to a short label.
+"""
+
+import base64
+import io
+import json
+import re
+
+IMAGE_DATA_URL_PREFIX = "data:image/png;base64,"
+DATA_URL_PATTERN = re.compile(r"^data:image/[a-zA-Z0-9.+-]+;base64,")
+
+DOCUMENT_BLOCK_TEMPLATE = "<<<DOCUMENT_CONTENT>>>\nFile: {name}\n{text}\n<<<END_DOCUMENT>>>"
+
+_DOCUMENT_BLOCK_PATTERN = re.compile(
+    r"(?s)<<<DOCUMENT_CONTENT>>>\nFile: (.*?)\n.*?<<<END_DOCUMENT>>>"
+)
+# Retain display support for linked pages embedded in older saved conversations.
+_LINK_BLOCK_PATTERN = re.compile(r"(?s)<<<LINK_CONTENT>>>\nURL: (.*?)\n.*?<<<END_LINK>>>")
+_GENERATED_IMAGE_PATTERN = re.compile(
+    r"!\[[^\]\n]*\]\(data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+\)"
+)
+
+
+def normalize_text(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def serialize_message_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def encode_image(image):
+    buffered = io.BytesIO()
+    image.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+
+def image_file_to_data_url(image_path):
+    """Read an image file and return it as a PNG data URL, closing the handle."""
+    from PIL import Image  # local import keeps module import cost down
+
+    with Image.open(image_path) as image:
+        if image.mode not in ("1", "L", "LA", "P", "RGB", "RGBA", "I", "I;16"):
+            image = image.convert("RGB")
+        return f"{IMAGE_DATA_URL_PREFIX}{encode_image(image)}"
+
+
+def is_data_url(value):
+    return isinstance(value, str) and bool(DATA_URL_PATTERN.match(value))
+
+
+def _api_content(message):
+    """Keep generated image bytes out of the model's plain-text conversation.
+
+    The full image remains in history for display and saving. Sending its base64
+    markdown as text can exhaust the context budget on the next user turn.
+    """
+    content = message.get("content", "")
+    if message.get("role") == "assistant" and isinstance(content, str):
+        content = _GENERATED_IMAGE_PATTERN.sub("[Generated image]", content)
+    return content
+
+
+def build_document_block(file_name, document_text):
+    return DOCUMENT_BLOCK_TEMPLATE.format(name=file_name, text=document_text)
+
+
+def join_parts(*parts):
+    return "\n".join(part for part in parts if part)
+
+
+def prepare_chat_messages(history):
+    """Convert history to a Chat Completions ``messages`` list."""
+    messages = []
+    for message in history or []:
+        content = _api_content(message)
+        image_url = message.get("image_url")
+        if message.get("role") == "user" and image_url:
+            user_content = []
+            if content:
+                user_content.append({"type": "text", "text": content})
+            user_content.append({"type": "image_url", "image_url": {"url": image_url}})
+            messages.append({"role": "user", "content": user_content})
+        else:
+            messages.append({"role": message.get("role", "user"), "content": content})
+    return messages
+
+
+def replace_history_content(history):
+    """Build the display copy of history for the Gradio chatbot.
+
+    Collapses the inlined document and link blocks down to a one-line label, and
+    appends any attached image as markdown so it renders in the transcript.
+    """
+    replaced_history = []
+    for message in history or []:
+        content = serialize_message_value(message.get("content", ""))
+
+        content = _DOCUMENT_BLOCK_PATTERN.sub(
+            lambda match: f"[File: {match.group(1)}]", content
+        )
+        content = _LINK_BLOCK_PATTERN.sub(lambda match: f"[URL: {match.group(1)}]", content)
+
+        image_url = message.get("image_url")
+        if image_url:
+            content += f"\n![Image]({image_url})"
+
+        replaced_history.append({
+            "role": message.get("role", "user"),
+            "content": content,
+        })
+
+    return replaced_history

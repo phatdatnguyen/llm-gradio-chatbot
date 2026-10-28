@@ -1,0 +1,35 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.vs/
+.gradio/
+chatbot-env/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+history/
+.cache/
+rag_chatbot/data/
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.*
+!.env.example
+
+# Local model weights belong to the inference servers, not the source repository.
+*.gguf
+*.ggml
+*.safetensors
+
+api_key.py
+CLAUDE.md
+# Local dated chat exports; source fixtures and license files remain trackable.
+/20??-??-??-*.txt
